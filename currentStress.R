@@ -25,7 +25,7 @@ pkgChecker <- function(x){
 }
 
 list.of.packages <-c( "githubinstall",
-                      "tcltk2","rModflow","future.apply","future","listenv","reshape")
+                      "tcltk2","rModflow","future.apply","future","listenv","reshape","ggplot2")
 
 suppressWarnings(pkgChecker(list.of.packages))
 
@@ -141,7 +141,11 @@ processBinaryHeads<-function(headsFile,M,byLayer){
   plan(multiprocess)
   cat(paste('Calculating P80 heads from',maxSP,'stress periods with Layer',selectLayer,'Heads','\n'))
   xf <-future_apply (HeadsMatrix,MARGIN=c(1,2),FUN=stats::quantile,probs=c(.2),na.rm=T)
+  cat(paste('Calculating P05 heads from',maxSP,'stress periods with Layer',selectLayer,'Heads','\n'))
+  yf <-future_apply (HeadsMatrix,MARGIN=c(1,2),FUN=stats::quantile,probs=c(.95),na.rm=T)
   # xf <-future_apply (PartialHeadsMatrix,MARGIN=c(1,2),FUN=stats::quantile,probs=c(.2),na.rm=T)
+  returnVals<- list(xf,yf)
+  return(returnVals)
 }
 areaWeighted <- function(df,param){
   Summary <-merge(merge(aggregate(df$AcresMM, by=list(df$EMT_ID), FUN=sum),
@@ -153,7 +157,7 @@ areaWeighted <- function(df,param){
 }
 plotHistoDens <- function(fileName,C1,stress,phys){
   graphics.off()
-  compare = melt(C1[C1$Phys==phys & C1$Status==stress,c('ObsTheta','SimTheta')])
+  compare = melt(C1[C1$Phys==phys & C1$Status==stress,c('ObsEpsilon','SimEpsilon')])
   if(length(compare[compare$value==0,]$value)>0) {
     compare[compare$value==0,]$value<-NA
   }
@@ -161,7 +165,7 @@ plotHistoDens <- function(fileName,C1,stress,phys){
 #    geom_histogram(aes(x=value,y=..density.., fill=variable),position="dodge",bins=15) +
     geom_histogram(aes(x=value, fill=variable),position="dodge",bins=15) +
     geom_density(aes(x=value,fill=variable),alpha=.2) +
-    labs(title=paste(stress,phys),x = "Theta (Feet NAVD88)")
+    labs(title=paste(stress,phys),x = "Epsilon (Feet NAVD88)")
   ggsave(filename=fileName,width=10,height=6.66,units="in",dpi=300)
 }
 
@@ -186,34 +190,78 @@ C2GrdPnts[NotNeeded]<-NULL
 
 names(C2GrdPnts) <-c("EMT_ID","Phys","Stress", "Wetland_Type","Hydro_Class", 
                       "SEQNUM","AcresMM", "XCOORD_UTM","YCOORD_UTM" )
-
+results<-listenv()
 topo<-readModflowTopo()
+plan(multisession)
 heads1<-getBinaryFile(M,1)
-p80HeadsLay1 %<-% processBinaryHeads(heads1,M,1)
+results[[1]] <- future({processBinaryHeads(heads1,M,1)})
 heads3<-getBinaryFile(M,3)
-p80HeadsLay3 %<-% processBinaryHeads(heads3,M,3)
-# p80Heads<-xf
+results[[2]] <- future({processBinaryHeads(heads3,M,1)})
+
+#====================================================================
+# Wait for values from future with progress indicators
+#====================================================================
+cat(paste('Waiting for background processing to complete','\n'))
+
+while (!resolved(results[[2]])) { if (!resolved(results[[1]])) { cat("+") };cat(":")}
+cat("\n")
+
+# p80HeadsLay1 <- values(results[[1]])
+# p80HeadsLay3 <- values(results[[2]])
+returnList <- values(results[[1]])
+p80HeadsLay1<-unlist(returnList[1])
+p05HeadsLay1<-unlist(returnList[2])
+
+returnList <- values(results[[2]])
+p80HeadsLay3<- unlist(returnList[[1]])
+p05HeadsLay3<- unlist(returnList[[2]])
+
 C1GrdPnts$topo <- topo[C1GrdPnts$SEQNUM]
 C1GrdPnts$p80L1 <- p80HeadsLay1[C1GrdPnts$SEQNUM]
+C1GrdPnts$p05L1 <- p05HeadsLay1[C1GrdPnts$SEQNUM]
+
 C1GrdPnts$p80L3 <- p80HeadsLay3[C1GrdPnts$SEQNUM]
+C1GrdPnts$p05L3 <- p05HeadsLay3[C1GrdPnts$SEQNUM]
 
 C1Topo<-areaWeighted(C1GrdPnts,'topo')
 C1P80L1<-areaWeighted(C1GrdPnts,'p80L1')
 C1P80L3<-areaWeighted(C1GrdPnts,'p80L3')
+C1P05L1<-areaWeighted(C1GrdPnts,'p05L1')
+C1P05L3<-areaWeighted(C1GrdPnts,'p05L3')
 C1<- merge(unique(C1GrdPnts[,c(2,3,4,5,6)]),
            merge(C1Topo[,c(1,5)],
-                 merge(C1P80L1[,c(1,5)],C1P80L3[,c(1,5)])))
+                 merge(C1P80L1[,c(1,5)],
+                       merge(C1P80L3[,c(1,5)],
+                             merge(C1P05L1[,c(1,5)],C1P05L3[,c(1,5)])))))
 
 C2GrdPnts$topo <- topo[C2GrdPnts$SEQNUM]
 C2GrdPnts$p80L1 <- p80HeadsLay1[C2GrdPnts$SEQNUM]
+C2GrdPnts$p05L1 <- p05HeadsLay1[C2GrdPnts$SEQNUM]
+
 C2GrdPnts$p80L3 <- p80HeadsLay3[C2GrdPnts$SEQNUM]
+C2GrdPnts$p05L3 <- p05HeadsLay3[C2GrdPnts$SEQNUM]
 
 C2Topo<-areaWeighted(C2GrdPnts,'topo')
 C2P80L1<-areaWeighted(C2GrdPnts,'p80L1')
 C2P80L3<-areaWeighted(C2GrdPnts,'p80L3')
+C2P05L1<-areaWeighted(C2GrdPnts,'p05L1')
+C2P05L3<-areaWeighted(C2GrdPnts,'p05L3')
 C2<- merge(unique(C2GrdPnts[,c(1,2,3,4,5)]),
            merge(C2Topo[,c(1,5)],
-                 merge(C2P80L1[,c(1,5)],C2P80L3[,c(1,5)])))
+                 merge(C2P80L1[,c(1,5)],
+                       merge(C2P80L3[,c(1,5)],
+                             merge(C2P05L1[,c(1,5)],C2P05L3[,c(1,5)])))))
+
+# C2GrdPnts$topo <- topo[C2GrdPnts$SEQNUM]
+# C2GrdPnts$p80L1 <- p80HeadsLay1[C2GrdPnts$SEQNUM]
+# C2GrdPnts$p80L3 <- p80HeadsLay3[C2GrdPnts$SEQNUM]
+# 
+# C2Topo<-areaWeighted(C2GrdPnts,'topo')
+# C2P80L1<-areaWeighted(C2GrdPnts,'p80L1')
+# C2P80L3<-areaWeighted(C2GrdPnts,'p80L3')
+# C2<- merge(unique(C2GrdPnts[,c(1,2,3,4,5)]),
+#            merge(C2Topo[,c(1,5)],
+#                  merge(C2P80L1[,c(1,5)],C2P80L3[,c(1,5)])))
 
 names(C2)[names(C2) == 'Stress'] <- 'Status'
 C2$Status <-as.character(C2$Status)
@@ -229,21 +277,21 @@ C1<-merge(C1, C1ObsP80[,c(2,6)])
 
 names(C1ObsP80)
 names(C1)
-C1$ObsTheta<-C1$ERE-C1$`X2009.2017_P80`
-C1$SimTheta<-NA
-C1[C1$Phys=="Ridge",]$SimTheta<-
+C1$ObsEpsilon<-C1$ERE-C1$`X2009.2017_P80`
+C1$SimEpsilon<-NA
+C1[C1$Phys=="Ridge",]$SimEpsilon<-
   C1[C1$Phys=="Ridge",]$AreaWgttopo-C1[C1$Phys=="Ridge",]$AreaWgtp80L3
 
-C1[C1$Phys=="Plain",]$SimTheta<-
+C1[C1$Phys=="Plain",]$SimEpsilon<-
   C1[C1$Phys=="Plain",]$AreaWgttopo-C1[C1$Phys=="Plain",]$AreaWgtp80L1
 
-C2$ObsTheta<-0
-C2$SimTheta<-NA
+C2$ObsEpsilon<-0
+C2$SimEpsilon<-NA
 
-C2[C2$Phys=="Ridge",]$SimTheta<-
+C2[C2$Phys=="Ridge",]$SimEpsilon<-
   C2[C2$Phys=="Ridge",]$AreaWgttopo-C2[C2$Phys=="Ridge",]$AreaWgtp80L3
 
-C2[C2$Phys=="Plain",]$SimTheta<-
+C2[C2$Phys=="Plain",]$SimEpsilon<-
   C2[C2$Phys=="Plain",]$AreaWgttopo-C2[C2$Phys=="Plain",]$AreaWgtp80L1
 
 Cs<-rbind(C1[,names(C1) %in% names(C2)],
@@ -252,13 +300,13 @@ Cs<-rbind(C1[,names(C1) %in% names(C2)],
 Cs$zScore = NA
 for (phys in unique(C1$Phys)){
   for (stress in unique(C1$Status)){
-    sdTheta <- 
-      sd(Cs[Cs$Status==stress & Cs$Phys==phys,]$SimTheta, na.rm=TRUE)
-    MeanTheta <- 
-      mean(Cs[Cs$Status==stress & Cs$Phys==phys,]$SimTheta, na.rm=TRUE)
+    sdEpsilon <- 
+      sd(Cs[Cs$Status==stress & Cs$Phys==phys,]$SimEpsilon, na.rm=TRUE)
+    MeanEpsilon <- 
+      mean(Cs[Cs$Status==stress & Cs$Phys==phys,]$SimEpsilon, na.rm=TRUE)
 
     Cs[Cs$Status==stress & Cs$Phys==phys,]$zScore <-
-      (Cs[Cs$Status==stress & Cs$Phys==phys,]$SimTheta - MeanTheta)/sdTheta
+      (Cs[Cs$Status==stress & Cs$Phys==phys,]$SimEpsilon - MeanEpsilon)/sdEpsilon
     # Class 1 histograms
     # fileName = paste0('C:\\Users\\krodberg\\Desktop\\C1',stress,'_',phys,'_histo.png')
     # plotHistoDens(fileName,C1[C1$Status==stress &
@@ -272,6 +320,7 @@ for (phys in unique(C1$Phys)){
     # plotHistoDens(fileName,Cs[Cs$Status==stress &
     #                             Cs$Phys==phys,],stress,phys)
     # class 1 and class 2 combined histograms with outliers removed
+    cat(paste('Plotting CsX',stress,phys,'historam'))
     fileName = paste0('C:\\Users\\krodberg\\Desktop\\CsX',stress,'_',phys,'_histo.png')
     plotHistoDens(fileName,Cs[Cs$Status==stress & 
                                 Cs$zScore < 2 & Cs$zScore > -2 &
@@ -279,3 +328,13 @@ for (phys in unique(C1$Phys)){
   }
 }
 
+for (phys in unique(C1$Phys)){
+  for (stress in unique(C1$Status)){
+    swTest <- shapiro.test(Cs[Cs$Status==stress &
+                                Cs$Phys==phys  & Cs$zScore < 2 & Cs$zScore > -2 ,]$SimEpsilon)    
+    swTest <- shapiro.test(Cs[Cs$Status==stress &
+                                Cs$Phys==phys  & Cs$zScore < 2 & Cs$zScore > -2 ,]$SimEpsilon)
+    cat (paste0('"shapiro.test for ","',stress,'","',phys,'",'))
+    cat(paste0(round(swTest$statistic,4), '  ', round(swTest$p.value,4), '\n'))
+  }
+}
